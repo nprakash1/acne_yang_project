@@ -1,0 +1,25 @@
+# Core
+torch>=2.0.0
+torchvision>=0.15.0
+numpy
+pandas
+matplotlib
+opencv-python-headless
+Pillow
+tqdm
+pyyaml
+
+# Detection
+ultralytics>=8.1.0           # YOLOv8 + RT-DETR
+pycocotools                  # COCO mAP evaluation
+roboflow                     # ACNE04 dataset download
+
+# Classification / Part 2
+scikit-learn
+albumentations
+grad-cam                     # pytorch-grad-cam
+timm                         # extra backbones (optional)
+
+# Misc
+seaborn
+kaggle                       # DermNet download

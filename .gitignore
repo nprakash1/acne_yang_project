@@ -1,0 +1,80 @@
+# --------------------------- Python ---------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+build/
+dist/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# --------------------------- Envs -----------------------------
+.venv/
+venv/
+env/
+.env
+.env.*
+
+# --------------------------- Secrets --------------------------
+# Never commit API tokens
+kaggle.json
+*.kaggle.json
+roboflow.json
+*.pem
+*.key
+
+# --------------------------- Datasets -------------------------
+# Bulk data lives outside the repo. Keep folder structure via .gitkeep.
+# Note: ignore *contents* not the directory itself, otherwise the negation
+# rule below cannot re-include the .gitkeep marker.
+data/*
+!data/.gitkeep
+
+# --------------------------- Outputs --------------------------
+# Trained weights, predictions, eval JSONs, viz PNGs, etc.
+outputs/*
+!outputs/.gitkeep
+
+# Ultralytics default run dirs (in case people use the CLI directly)
+runs/
+
+# Experiment trackers
+wandb/
+mlruns/
+lightning_logs/
+
+# Model checkpoints anywhere in the tree
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.tflite
+*.engine
+
+# Roboflow / archive leftovers
+*.zip
+*.tar
+*.tar.gz
+*.7z
+
+# --------------------------- Notebooks ------------------------
+.ipynb_checkpoints/
+# Tip: run `jupyter nbconvert --clear-output` before commits if outputs
+# are bulky. We don't auto-strip here so that demo screenshots survive.
+
+# --------------------------- IDE / OS -------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
