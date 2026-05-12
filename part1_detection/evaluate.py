@@ -168,13 +168,18 @@ def coco_evaluate(
 
     coco_gt = COCO(gt_json)
 
-    # The category id we used for predictions must be valid in GT.
-    # If GT uses a different cat id, remap.
-    valid_cat_ids = coco_gt.getCatIds()
-    if 1 not in valid_cat_ids and len(valid_cat_ids) >= 1:
-        primary = valid_cat_ids[-1]  # Roboflow puts the real class last
+    # Remap all predictions to the category that actually carries annotations.
+    # Roboflow COCO exports often include a phantom super-category with id=0
+    # and put the real class at id=1 -- but some exports flip this. Pick the
+    # category with the most GT annotations to be robust.
+    ann_cat_counts: dict[int, int] = {}
+    for ann in coco_gt.loadAnns(coco_gt.getAnnIds()):
+        ann_cat_counts[ann["category_id"]] = ann_cat_counts.get(ann["category_id"], 0) + 1
+    if ann_cat_counts:
+        primary = max(ann_cat_counts, key=ann_cat_counts.get)
         for d in detections:
             d["category_id"] = primary
+
 
     if out_json is not None:
         Path(out_json).parent.mkdir(parents=True, exist_ok=True)

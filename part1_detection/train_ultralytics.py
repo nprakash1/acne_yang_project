@@ -12,31 +12,37 @@ from pathlib import Path
 from typing import Literal
 
 
+# Larger imgsz (1024) is the single biggest lever for acne detection because
+# lesions are only 5-30 px wide in the source 640px images. We pair that with
+# longer training and slightly smaller batches to keep VRAM in budget.
 ULTRALYTICS_MODELS: dict[str, dict] = {
     "yolo": {
         "weights": "yolov8s.pt",
         "project": "outputs/yolov8",
-        "epochs": 100,
-        "batch": 16,
+        "epochs": 150,
+        "batch": 12,
+        "imgsz": 1024,
         # YOLO-friendly: mosaic + mixup + HSV jitter
         "aug": dict(mosaic=1.0, mixup=0.1, hsv_h=0.015, hsv_s=0.7, hsv_v=0.4),
     },
     "rtdetr": {
         "weights": "rtdetr-l.pt",
         "project": "outputs/rtdetr",
-        "epochs": 80,
-        "batch": 8,
+        "epochs": 120,
+        "batch": 6,
+        "imgsz": 1024,
         # DETR-family detectors are usually more stable with milder aug
         "aug": dict(mosaic=0.0, mixup=0.0, hsv_h=0.015, hsv_s=0.5, hsv_v=0.3),
     },
 }
 
 
+
 def train_ultralytics(
     kind: Literal["yolo", "rtdetr"],
     data: str,
     epochs: int | None = None,
-    imgsz: int = 640,
+    imgsz: int | None = None,
     batch: int | None = None,
     model_name: str | None = None,
     project: str | None = None,
@@ -53,6 +59,8 @@ def train_ultralytics(
     project = project or cfg["project"]
     epochs = epochs or cfg["epochs"]
     batch = batch or cfg["batch"]
+    imgsz = imgsz or cfg.get("imgsz", 640)
+
 
     if kind == "rtdetr":
         from ultralytics import RTDETR as Model

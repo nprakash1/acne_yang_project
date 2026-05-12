@@ -30,6 +30,14 @@ from torchvision.transforms import functional as F
 from .data import AcneCocoDataset, collate_fn
 
 
+# Faster R-CNN input image size. Default torchvision is 800/1333 which is fine
+# for COCO objects but shrinks our 5-30 px acne lesions further. Bumping these
+# up improves small-object recall noticeably.
+FRCNN_MIN_SIZE = 1024
+FRCNN_MAX_SIZE = 1600
+
+
+
 # ----------------------------- transforms ----------------------------- #
 
 
@@ -77,14 +85,31 @@ def build_model(num_classes: int = 2, small_anchors: bool = True) -> FasterRCNN:
     """Build a Faster R-CNN model with ResNet-50-FPN.
 
     num_classes includes the background class, so for ACNE04 (1 fg class) it's 2.
+
+    We also bump min_size/max_size and tighten the RPN proposal limits/NMS
+    so the model keeps more small-object candidates -- the COCO defaults
+    were designed for big objects and silently throw away acne hits.
     """
-    model = fasterrcnn_resnet50_fpn(weights="DEFAULT")
+    model = fasterrcnn_resnet50_fpn(
+        weights="DEFAULT",
+        min_size=FRCNN_MIN_SIZE,
+        max_size=FRCNN_MAX_SIZE,
+        # Keep more proposals: acne is dense and small.
+        rpn_pre_nms_top_n_train=4000,
+        rpn_pre_nms_top_n_test=2000,
+        rpn_post_nms_top_n_train=2000,
+        rpn_post_nms_top_n_test=1000,
+        rpn_nms_thresh=0.7,
+        box_detections_per_img=300,
+        box_nms_thresh=0.5,
+        box_score_thresh=0.05,
+    )
 
     if small_anchors:
         # Default torchvision anchor sizes are (32, 64, 128, 256, 512) -- way too
-        # large for acne lesions (~5-30 px). Shrink them while keeping FPN's
-        # one-size-per-level convention.
-        anchor_sizes = ((4,), (8,), (16,), (32,), (64,))
+        # large for acne lesions (~5-30 px). Shrink them and add a couple
+        # mid-range sizes per level for variation.
+        anchor_sizes = ((4, 6), (8, 12), (16, 24), (32, 48), (64, 96))
         aspect_ratios = ((0.5, 1.0, 2.0),) * len(anchor_sizes)
         model.rpn.anchor_generator = AnchorGenerator(
             sizes=anchor_sizes, aspect_ratios=aspect_ratios
@@ -100,6 +125,7 @@ def build_model(num_classes: int = 2, small_anchors: bool = True) -> FasterRCNN:
     in_features = model.roi_heads.box_predictor.cls_score.in_features
     model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
     return model
+
 
 
 # ----------------------------- training ------------------------------- #
