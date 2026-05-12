@@ -61,11 +61,11 @@ def train_ultralytics(
     batch = batch or cfg["batch"]
     imgsz = imgsz or cfg.get("imgsz", 640)
 
-
     if kind == "rtdetr":
         from ultralytics import RTDETR as Model
     else:
         from ultralytics import YOLO as Model
+
 
     model = Model(model_name)
     results = model.train(
