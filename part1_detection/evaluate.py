@@ -190,9 +190,14 @@ def coco_evaluate(
         coco_dt = coco_gt.loadRes(detections)
 
     e = COCOeval(coco_gt, coco_dt, iouType="bbox")
+    # Single-class detection: ignore category ids so a Roboflow export with
+    # phantom super-categories (id=0) can't silently zero out mAP. Matches
+    # purely on bbox IoU + image id.
+    e.params.useCats = 0
     e.evaluate()
     e.accumulate()
     e.summarize()
+
 
     # COCOeval.stats indices:
     #   0: AP @ IoU=0.50:0.95   1: AP @ 0.50   2: AP @ 0.75
