@@ -17,10 +17,14 @@ from typing import Literal
 # longer training and slightly smaller batches to keep VRAM in budget.
 ULTRALYTICS_MODELS: dict[str, dict] = {
     "yolo": {
-        "weights": "yolov8s.pt",
+        # yolov8m: 26M params vs yolov8s's 11M. ~+5 mAP on COCO and typically
+        # a larger gain on dense small-object datasets like ACNE04 because
+        # the deeper backbone preserves more detail at the P3/P4 levels.
+        "weights": "yolov8m.pt",
         "project": "outputs/yolov8",
         "epochs": 150,
-        "batch": 12,
+        # Batch dropped 12 -> 8 to keep VRAM under 14 GB at imgsz=1024 on a T4.
+        "batch": 8,
         "imgsz": 1024,
         # YOLO-friendly: mosaic + mixup + HSV jitter
         "aug": dict(mosaic=1.0, mixup=0.1, hsv_h=0.015, hsv_s=0.7, hsv_v=0.4),
