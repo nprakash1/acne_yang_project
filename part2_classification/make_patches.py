@@ -10,8 +10,9 @@ Output structure:
     out_root/
         train/pos/*.jpg   train/neg/*.jpg
         val/pos/*.jpg     val/neg/*.jpg
+        test/pos/*.jpg    test/neg/*.jpg
 
-The split mirrors the underlying ACNE04 train/valid splits.
+The split mirrors the underlying ACNE04 train/valid/test splits when present.
 """
 
 from __future__ import annotations
@@ -74,15 +75,18 @@ def make_patches(
 
     Parameters
     ----------
-    coco_root  : root containing train/, valid/ subdirs each with _annotations.coco.json
-    out_root   : where to write train/{pos,neg}/, val/{pos,neg}/
+    coco_root  : root containing train/, valid/, test/ subdirs with _annotations.coco.json
+    out_root   : where to write train/{pos,neg}/, val/{pos,neg}/, test/{pos,neg}/
     splits     : map of dataset-split -> source COCO subdir.
-                 default: {"train": "train", "val": "valid"}
+                 default: train/valid/test when test exists
     expand     : context expansion factor for positives
     target_size: side length of saved patch (after resize)
     neg_per_pos: how many negatives per positive (per image)
     """
-    splits = splits or {"train": "train", "val": "valid"}
+    if splits is None:
+        splits = {"train": "train", "val": "valid"}
+        if (Path(coco_root) / "test" / "_annotations.coco.json").exists():
+            splits["test"] = "test"
     rng = random.Random(seed)
     out_root = Path(out_root)
 

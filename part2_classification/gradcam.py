@@ -1,8 +1,8 @@
 """
 Visualize where the classifier looks on DermNet using Grad-CAM.
 
-Saves a grid of N DermNet images with Grad-CAM heatmaps overlaid,
-labelled with (true class, predicted prob).
+Saves a grid of N DermNet images as original/Grad-CAM pairs, labelled with
+(true class, predicted prob).
 """
 
 from __future__ import annotations
@@ -43,6 +43,7 @@ def visualize_gradcam(
     seed: int = 0,
     device: str | None = None,
     sampling: str = "stratified",  # "stratified" -> mix of TP/FP/TN/FN
+    show_original: bool = True,
 ):
     """Render Grad-CAM heatmaps for n_samples DermNet predictions.
 
@@ -107,15 +108,21 @@ def visualize_gradcam(
     cam = GradCAM(model=model, target_layers=target_layers)
 
     n = len(selected)
-    cols = 5
-    rows_n = int(np.ceil(n / cols))
-    fig, axes = plt.subplots(rows_n, cols, figsize=(3.2 * cols, 3.2 * rows_n))
-    axes = np.atleast_2d(axes)
+    if show_original:
+        cols = 4  # two samples per row, original + heatmap for each sample
+        samples_per_row = cols // 2
+        rows_n = int(np.ceil(n / samples_per_row))
+        fig, axes = plt.subplots(rows_n, cols, figsize=(3.0 * cols, 3.1 * rows_n))
+        axes = np.atleast_2d(axes)
+    else:
+        cols = 5
+        rows_n = int(np.ceil(n / cols))
+        fig, axes = plt.subplots(rows_n, cols, figsize=(3.2 * cols, 3.2 * rows_n))
+        axes = np.atleast_2d(axes)
 
     for i, row in enumerate(selected):
-        r, c = divmod(i, cols)
-        ax = axes[r, c]
-        img = np.array(Image.open(row["path"]).convert("RGB"))
+        raw_img = np.array(Image.open(row["path"]).convert("RGB"))
+        img = raw_img
         if preprocess is not None:
             img = preprocess(img)
         x = eval_tf(image=img)["image"].unsqueeze(0).to(device)
@@ -127,23 +134,42 @@ def visualize_gradcam(
         grayscale_cam = cam(input_tensor=x, targets=[ClassifierOutputTarget(target_class)])[0]
         overlay = show_cam_on_image(rgb_for_show, grayscale_cam, use_rgb=True)
 
-        ax.imshow(overlay)
         kind = (
             "TP" if row["label"] == 1 and row["pred"] == 1
             else "FP" if row["label"] == 0 and row["pred"] == 1
             else "TN" if row["label"] == 0 and row["pred"] == 0
             else "FN"
         )
-        ax.set_title(
-            f"{kind}  p(acne)={row['prob_acne']:.2f}\n{Path(row['path']).parent.name}",
-            fontsize=8,
-        )
-        ax.axis("off")
+        title = f"{kind}  p(acne)={row['prob_acne']:.2f}\n{Path(row['path']).parent.name}"
+
+        if show_original:
+            r = i // samples_per_row
+            c = (i % samples_per_row) * 2
+            ax_orig = axes[r, c]
+            ax_cam = axes[r, c + 1]
+            ax_orig.imshow(raw_img)
+            ax_orig.set_title(f"Original\n{title}", fontsize=8)
+            ax_cam.imshow(overlay)
+            ax_cam.set_title("Grad-CAM", fontsize=8)
+            ax_orig.axis("off")
+            ax_cam.axis("off")
+        else:
+            r, c = divmod(i, cols)
+            ax = axes[r, c]
+            ax.imshow(overlay)
+            ax.set_title(title, fontsize=8)
+            ax.axis("off")
 
     # blank any unused axes
-    for j in range(n, rows_n * cols):
-        r, c = divmod(j, cols)
-        axes[r, c].axis("off")
+    if show_original:
+        used_axes = n * 2
+        for j in range(used_axes, rows_n * cols):
+            r, c = divmod(j, cols)
+            axes[r, c].axis("off")
+    else:
+        for j in range(n, rows_n * cols):
+            r, c = divmod(j, cols)
+            axes[r, c].axis("off")
 
     plt.tight_layout()
     out_path = out_dir / "gradcam_grid.png"
@@ -161,6 +187,7 @@ if __name__ == "__main__":
     p.add_argument("--n", type=int, default=10)
     p.add_argument("--dermnet-train", default=None)
     p.add_argument("--da-method", default="reinhard")
+    p.add_argument("--overlay-only", action="store_true")
     args = p.parse_args()
     visualize_gradcam(
         weights=args.weights,
@@ -169,4 +196,5 @@ if __name__ == "__main__":
         n_samples=args.n,
         dermnet_train_root=args.dermnet_train,
         da_method=args.da_method,
+        show_original=not args.overlay_only,
     )
