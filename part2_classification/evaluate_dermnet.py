@@ -31,7 +31,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from .dataset import get_eval_transforms
 from .domain_adapt import build_reference_mosaic, make_preprocessor
-from .train_classifier import load_classifier
+from .train_classifier import load_classifier, sample_label_blind_dermnet_paths
 
 
 # Folder names in the Kaggle DermNet release that correspond to acne.
@@ -105,19 +105,16 @@ def evaluate(
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Build reference mosaic from <=20 unlabeled DermNet train images
+    # Build reference mosaic from <=20 unlabeled DermNet train images.
+    # Sample LABEL-BLIND: uniform random over all train images regardless of
+    # which folder they came from. (The previous implementation took one
+    # image per class folder, which is accidentally label-stratified and
+    # would technically constitute a label leak under a strict reading of
+    # the assignment.)
     train_root = Path(dermnet_root) / train_subdir
-    sample_paths = []
-    if train_root.exists():
-        for cls_dir in sorted(train_root.iterdir()):
-            if cls_dir.is_dir():
-                for p in cls_dir.iterdir():
-                    if p.suffix.lower() in {".jpg", ".jpeg", ".png"}:
-                        sample_paths.append(p)
-                        break
-            if len(sample_paths) >= n_unlabeled_for_da:
-                break
-    sample_paths = sample_paths[:n_unlabeled_for_da]
+    sample_paths = sample_label_blind_dermnet_paths(
+        train_root, n=n_unlabeled_for_da
+    )
 
     if sample_paths and da_method != "none":
         ref = build_reference_mosaic(sample_paths)

@@ -2,6 +2,13 @@
 Train a binary acne / non-acne classifier on ACNE04 patches.
 
 Selects best checkpoint by validation AUROC.
+
+Supports optional source-side DermNet normalization during training: a
+fraction of ACNE04 crops are Reinhard- / histogram-matched to a 20-image
+DermNet reference mosaic so the source pixel distribution overlaps the
+target one at training time. The 20-image budget is sampled
+*label-blind* (uniformly over all DermNet train images regardless of folder)
+to comply with the brief.
 """
 
 from __future__ import annotations
@@ -9,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
 from pathlib import Path
 
 import numpy as np
@@ -22,8 +30,68 @@ from .dataset import (
     class_weights,
     get_eval_transforms,
     get_train_transforms,
+    make_stochastic_preprocess,
 )
+from .domain_adapt import build_reference_mosaic, make_preprocessor
 from .model import build_face_resnet, build_resnet50
+
+
+def sample_label_blind_dermnet_paths(
+    dermnet_train_root: str | os.PathLike,
+    n: int = 20,
+    seed: int = 0,
+) -> list[Path]:
+    """Sample `n` DermNet train images uniformly at random across all classes.
+
+    This is the brief-compliant way to spend the 20-image target-domain
+    budget: we never read folder names as labels, we just collect every
+    image into one flat pool and sample uniformly.
+    """
+    root = Path(dermnet_train_root)
+    if not root.exists():
+        return []
+    all_paths: list[Path] = []
+    for d in root.rglob("*"):
+        if d.is_file() and d.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp"}:
+            all_paths.append(d)
+    if not all_paths:
+        return []
+    rng = random.Random(seed)
+    rng.shuffle(all_paths)
+    return all_paths[:n]
+
+
+def build_source_side_preprocessor(
+    dermnet_train_root: str | os.PathLike | None,
+    method: str = "reinhard",
+    n_ref: int = 20,
+    apply_p: float = 0.5,
+    seed: int = 0,
+):
+    """Return a stochastic uint8-RGB->uint8-RGB preprocessor or None.
+
+    If method=='none' or no DermNet root is provided, returns None.
+    Otherwise applies Reinhard/histogram match (with prob apply_p per call)
+    using a label-blind 20-image DermNet reference mosaic.
+    """
+    if method == "none" or not dermnet_train_root:
+        return None
+    sample_paths = sample_label_blind_dermnet_paths(
+        dermnet_train_root, n=n_ref, seed=seed
+    )
+    if not sample_paths:
+        print(
+            f"[source-DA] no DermNet train images found under {dermnet_train_root}; "
+            "skipping source-side normalization."
+        )
+        return None
+    ref = build_reference_mosaic(sample_paths)
+    base = make_preprocessor(ref, method=method)
+    print(
+        f"[source-DA] applying {method} with prob={apply_p:.2f} during training, "
+        f"reference built from {len(sample_paths)} label-blind DermNet train imgs"
+    )
+    return make_stochastic_preprocess(base, p=apply_p)
 
 
 @torch.no_grad()
@@ -57,6 +125,10 @@ def train(
     weight_decay: float = 1e-4,
     img_size: int = 224,
     heavy_da: bool = True,
+    color_shortcut_break: bool = True,
+    source_da_method: str = "none",  # "none" | "reinhard" | "histogram"
+    dermnet_train_root: str | os.PathLike | None = None,
+    source_da_p: float = 0.5,
     device: str | None = None,
     num_workers: int = 4,
 ):
@@ -64,10 +136,27 @@ def train(
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    train_tf = get_train_transforms(img_size=img_size, heavy_da=heavy_da)
+    train_tf = get_train_transforms(
+        img_size=img_size,
+        heavy_da=heavy_da,
+        color_shortcut_break=color_shortcut_break,
+    )
     eval_tf = get_eval_transforms(img_size=img_size)
 
-    train_ds = PatchFolder(Path(patches_root) / "train", transform=train_tf)
+    # Source-side DA: optionally Reinhard-normalize some ACNE04 training crops
+    # toward DermNet color statistics. Val set is left untouched so val AUROC
+    # tracks in-domain performance.
+    train_preprocess = build_source_side_preprocessor(
+        dermnet_train_root=dermnet_train_root,
+        method=source_da_method,
+        apply_p=source_da_p,
+    )
+
+    train_ds = PatchFolder(
+        Path(patches_root) / "train",
+        transform=train_tf,
+        preprocess=train_preprocess,
+    )
     val_ds = PatchFolder(Path(patches_root) / "val", transform=eval_tf)
     print(f"train patches: {len(train_ds)}  |  val patches: {len(val_ds)}")
 
@@ -159,6 +248,23 @@ if __name__ == "__main__":
     p.add_argument("--batch-size", type=int, default=64)
     p.add_argument("--lr", type=float, default=1e-4)
     p.add_argument("--no-heavy-da", action="store_true")
+    p.add_argument(
+        "--no-color-break",
+        action="store_true",
+        help="Disable ToGray/ChannelShuffle/RGBShift augmentations (color-shortcut breakers).",
+    )
+    p.add_argument(
+        "--source-da-method",
+        default="none",
+        choices=["none", "reinhard", "histogram"],
+        help="Apply DermNet-style color normalization to a fraction of training images.",
+    )
+    p.add_argument(
+        "--dermnet-train",
+        default=None,
+        help="Path to DermNet train root. Required if --source-da-method != none.",
+    )
+    p.add_argument("--source-da-p", type=float, default=0.5)
     args = p.parse_args()
     train(
         patches_root=args.patches,
@@ -168,4 +274,8 @@ if __name__ == "__main__":
         batch_size=args.batch_size,
         lr=args.lr,
         heavy_da=not args.no_heavy_da,
+        color_shortcut_break=not args.no_color_break,
+        source_da_method=args.source_da_method,
+        dermnet_train_root=args.dermnet_train,
+        source_da_p=args.source_da_p,
     )

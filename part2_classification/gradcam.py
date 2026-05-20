@@ -23,7 +23,7 @@ from pytorch_grad_cam.utils.image import show_cam_on_image
 from .dataset import IMAGENET_MEAN, IMAGENET_STD, get_eval_transforms
 from .domain_adapt import build_reference_mosaic, make_preprocessor
 from .model import get_target_layers_for_gradcam
-from .train_classifier import load_classifier
+from .train_classifier import load_classifier, sample_label_blind_dermnet_paths
 
 
 def _denormalize_for_display(img_tensor: torch.Tensor) -> np.ndarray:
@@ -88,18 +88,14 @@ def visualize_gradcam(
     # what the model actually saw.
     preprocess = None
     if dermnet_train_root and da_method != "none":
-        train_root = Path(dermnet_train_root)
-        sample_paths = []
-        for cls_dir in sorted(train_root.iterdir()):
-            if cls_dir.is_dir():
-                for p in cls_dir.iterdir():
-                    if p.suffix.lower() in {".jpg", ".jpeg", ".png"}:
-                        sample_paths.append(p)
-                        break
-            if len(sample_paths) >= 20:
-                break
+        # Label-blind 20-image sample (uniform random over all DermNet train
+        # images regardless of folder) -- same as evaluate_dermnet so the
+        # heatmap reflects exactly what the model saw at eval.
+        sample_paths = sample_label_blind_dermnet_paths(
+            Path(dermnet_train_root), n=20
+        )
         if sample_paths:
-            ref = build_reference_mosaic(sample_paths[:20])
+            ref = build_reference_mosaic(sample_paths)
             preprocess = make_preprocessor(ref, method=da_method)
 
     eval_tf = get_eval_transforms(img_size=img_size)

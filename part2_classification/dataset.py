@@ -5,11 +5,14 @@ Augmentation choices are tuned for the ACNE04 -> DermNet domain shift:
     - heavy photometric distortion to mimic dermatology lighting/cameras
     - Gaussian blur + JPEG compression to mimic clinical low-quality images
     - small geometric jitter only (acne shouldn't morph)
+    - color-shortcut breakers (ToGray + ChannelShuffle + RGBShift) so the
+      model cannot rely on "red = acne" to classify
 """
 
 from __future__ import annotations
 
 import os
+import random
 from pathlib import Path
 from typing import Callable
 
@@ -30,8 +33,22 @@ IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 
 
-def get_train_transforms(img_size: int = 224, heavy_da: bool = True):
-    """Strong augmentations for ACNE04 -> DermNet generalization."""
+def get_train_transforms(
+    img_size: int = 224,
+    heavy_da: bool = True,
+    color_shortcut_break: bool = True,
+):
+    """Strong augmentations for ACNE04 -> DermNet generalization.
+
+    Parameters
+    ----------
+    heavy_da
+        Brightness/contrast/gamma/HSV + blur/JPEG + coarse dropout.
+    color_shortcut_break
+        Adds ToGray, ChannelShuffle and a wider RGBShift on top of `heavy_da`.
+        Designed to prevent the classifier from learning "red blob => acne",
+        which is the single biggest cross-domain failure mode on DermNet.
+    """
     if A is None:
         raise RuntimeError("albumentations is required")
     base = [
@@ -46,7 +63,7 @@ def get_train_transforms(img_size: int = 224, heavy_da: bool = True):
                 [
                     A.RandomBrightnessContrast(brightness_limit=0.3, contrast_limit=0.3, p=1.0),
                     A.RandomGamma(gamma_limit=(70, 130), p=1.0),
-                    A.HueSaturationValue(hue_shift_limit=15, sat_shift_limit=25, val_shift_limit=20, p=1.0),
+                    A.HueSaturationValue(hue_shift_limit=20, sat_shift_limit=30, val_shift_limit=25, p=1.0),
                 ],
                 p=0.85,
             ),
@@ -58,7 +75,18 @@ def get_train_transforms(img_size: int = 224, heavy_da: bool = True):
                 ],
                 p=0.5,
             ),
-            A.CoarseDropout(max_holes=4, max_height=24, max_width=24, p=0.3),
+        ]
+    if color_shortcut_break:
+        # These three together break the "red = acne" shortcut without
+        # destroying useful color cues entirely.
+        base += [
+            A.ToGray(p=0.2),
+            A.ChannelShuffle(p=0.15),
+            A.RGBShift(r_shift_limit=40, g_shift_limit=40, b_shift_limit=40, p=0.5),
+        ]
+    if heavy_da:
+        base += [
+            A.CoarseDropout(max_holes=6, max_height=24, max_width=24, p=0.5),
         ]
     base += [A.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD), ToTensorV2()]
     return A.Compose(base)
@@ -75,6 +103,32 @@ def get_eval_transforms(img_size: int = 224):
             ToTensorV2(),
         ]
     )
+
+
+def make_stochastic_preprocess(
+    fn: Callable[[np.ndarray], np.ndarray] | None,
+    p: float = 0.5,
+) -> Callable[[np.ndarray], np.ndarray] | None:
+    """Wrap a uint8-RGB->uint8-RGB preprocessor so it only fires with prob `p`.
+
+    Used during training to apply DermNet-style color normalization (Reinhard /
+    histogram match) to a random fraction of ACNE04 crops. The model then
+    sees source labels but partially-target pixel statistics, which directly
+    closes the train/test distribution gap.
+
+    Set `p=1.0` for "always apply" (e.g. test-time).
+    """
+    if fn is None or p <= 0.0:
+        return None
+    if p >= 1.0:
+        return fn
+
+    def _stochastic(img: np.ndarray) -> np.ndarray:
+        if random.random() < p:
+            return fn(img)
+        return img
+
+    return _stochastic
 
 
 class PatchFolder(Dataset):
