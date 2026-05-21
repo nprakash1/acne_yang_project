@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import random
+import inspect
 from pathlib import Path
 from typing import Callable
 
@@ -31,6 +32,27 @@ except Exception:  # pragma: no cover
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
+
+
+def _image_compression(p: float = 1.0):
+    """Albumentations ImageCompression wrapper compatible with v1 and v2."""
+    sig = inspect.signature(A.ImageCompression)
+    if "quality_range" in sig.parameters:  # albumentations >= 2
+        return A.ImageCompression(quality_range=(40, 85), p=p)
+    return A.ImageCompression(quality_lower=40, quality_upper=85, p=p)
+
+
+def _coarse_dropout(p: float = 0.5):
+    """Albumentations CoarseDropout wrapper compatible with v1 and v2."""
+    sig = inspect.signature(A.CoarseDropout)
+    if "num_holes_range" in sig.parameters:  # albumentations >= 2
+        return A.CoarseDropout(
+            num_holes_range=(1, 6),
+            hole_height_range=(8, 24),
+            hole_width_range=(8, 24),
+            p=p,
+        )
+    return A.CoarseDropout(max_holes=6, max_height=24, max_width=24, p=p)
 
 
 def get_train_transforms(
@@ -71,7 +93,7 @@ def get_train_transforms(
                 [
                     A.GaussianBlur(blur_limit=(3, 7), p=1.0),
                     A.MotionBlur(blur_limit=5, p=1.0),
-                    A.ImageCompression(quality_lower=40, quality_upper=85, p=1.0),
+                    _image_compression(p=1.0),
                 ],
                 p=0.5,
             ),
@@ -86,7 +108,7 @@ def get_train_transforms(
         ]
     if heavy_da:
         base += [
-            A.CoarseDropout(max_holes=6, max_height=24, max_width=24, p=0.5),
+            _coarse_dropout(p=0.5),
         ]
     base += [A.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD), ToTensorV2()]
     return A.Compose(base)

@@ -17,6 +17,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import torch
@@ -65,9 +66,92 @@ class DermNetBinaryDataset(Dataset):
         return img, torch.tensor(label, dtype=torch.long), str(path)
 
 
+def _five_crop_boxes(W: int, H: int, crop_side: int) -> list[tuple[int, int, int, int]]:
+    crop_side = min(crop_side, W, H)
+    coords = [
+        (0, 0),
+        (W - crop_side, 0),
+        (0, H - crop_side),
+        (W - crop_side, H - crop_side),
+        ((W - crop_side) // 2, (H - crop_side) // 2),
+    ]
+    boxes = []
+    seen = set()
+    for x1, y1 in coords:
+        box = (int(x1), int(y1), int(x1 + crop_side), int(y1 + crop_side))
+        if box not in seen:
+            boxes.append(box)
+            seen.add(box)
+    return boxes
+
+
+def make_multicrop_images(
+    img: np.ndarray,
+    crop_fracs: tuple[float, ...] = (1.0, 0.75, 0.5),
+) -> list[np.ndarray]:
+    """Return deterministic full/center/corner crops for image-level MIL eval.
+
+    The classifier is trained on patches, but DermNet images are full clinical
+    images. Multi-crop evaluation turns each DermNet image into a small bag of
+    local views, scores each crop, then aggregates back to one image score.
+    This is automatic/reproducible, unlike hand-cropping the test set.
+    """
+    H, W = img.shape[:2]
+    crops = [img]
+    short = min(W, H)
+    for frac in crop_fracs:
+        if frac >= 0.999:
+            continue
+        side = max(32, int(round(short * frac)))
+        for x1, y1, x2, y2 in _five_crop_boxes(W, H, side):
+            crops.append(img[y1:y2, x1:x2])
+    return crops
+
+
+class DermNetMultiCropDataset(Dataset):
+    """DermNet dataset returning a bag of deterministic crops per image."""
+
+    def __init__(
+        self,
+        root: str | os.PathLike,
+        transform=None,
+        preprocess=None,
+        crop_fracs: tuple[float, ...] = (1.0, 0.75, 0.5),
+    ):
+        self.root = Path(root)
+        self.transform = transform
+        self.preprocess = preprocess
+        self.crop_fracs = crop_fracs
+        self.samples: list[tuple[Path, int]] = []
+        for cls_dir in sorted(self.root.iterdir()):
+            if not cls_dir.is_dir():
+                continue
+            label = 1 if any(k in cls_dir.name.lower() for k in ACNE_CLASS_KEYWORDS) else 0
+            for p in cls_dir.iterdir():
+                if p.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp"}:
+                    self.samples.append((p, label))
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        path, label = self.samples[idx]
+        img = np.array(Image.open(path).convert("RGB"))
+        if self.preprocess is not None:
+            img = self.preprocess(img)
+        crops = make_multicrop_images(img, crop_fracs=self.crop_fracs)
+        xs = [self.transform(image=c)["image"] for c in crops]
+        return torch.stack(xs), torch.tensor(label, dtype=torch.long), str(path)
+
+
 def collate_with_paths(batch):
     xs, ys, ps = zip(*batch)
     return torch.stack(xs), torch.stack(ys), list(ps)
+
+
+def collate_multicrop_with_paths(batch):
+    crop_batches, ys, paths = zip(*batch)
+    return list(crop_batches), torch.stack(ys), list(paths)
 
 
 @torch.no_grad()
@@ -87,6 +171,38 @@ def predict(model, loader, device, tta: bool = False):
     return np.concatenate(all_probs), np.concatenate(all_y), all_paths
 
 
+@torch.no_grad()
+def predict_multicrop(
+    model,
+    loader,
+    device,
+    tta: bool = False,
+    agg: Literal["max", "mean", "top3_mean"] = "top3_mean",
+):
+    model.eval()
+    all_probs, all_y, all_paths = [], [], []
+    for crop_batches, y, paths in loader:
+        for crops, yi, p in zip(crop_batches, y, paths):
+            crops = crops.to(device, non_blocking=True)
+            logits = model(crops)
+            if tta:
+                logits = (logits + model(torch.flip(crops, dims=[3]))) / 2
+            crop_probs = torch.softmax(logits, dim=1)[:, 1].detach().cpu().numpy()
+            if agg == "max":
+                prob = float(crop_probs.max())
+            elif agg == "mean":
+                prob = float(crop_probs.mean())
+            elif agg == "top3_mean":
+                k = min(3, len(crop_probs))
+                prob = float(np.sort(crop_probs)[-k:].mean())
+            else:
+                raise ValueError(agg)
+            all_probs.append(prob)
+            all_y.append(int(yi.item()))
+            all_paths.append(p)
+    return np.array(all_probs), np.array(all_y), all_paths
+
+
 def evaluate(
     weights: str,
     dermnet_root: str,
@@ -97,6 +213,8 @@ def evaluate(
     img_size: int = 224,
     batch_size: int = 64,
     tta: bool = True,
+    eval_mode: Literal["full", "multicrop"] = "full",
+    multicrop_agg: Literal["max", "mean", "top3_mean"] = "top3_mean",
     out_dir: str = "outputs/dermnet_eval",
     device: str | None = None,
 ):
@@ -125,21 +243,33 @@ def evaluate(
         print("[DA] no preprocessing applied")
 
     eval_tf = get_eval_transforms(img_size=img_size)
-    test_ds = DermNetBinaryDataset(
-        Path(dermnet_root) / test_subdir, transform=eval_tf, preprocess=preprocess
-    )
+    if eval_mode == "full":
+        test_ds = DermNetBinaryDataset(
+            Path(dermnet_root) / test_subdir, transform=eval_tf, preprocess=preprocess
+        )
+    elif eval_mode == "multicrop":
+        test_ds = DermNetMultiCropDataset(
+            Path(dermnet_root) / test_subdir, transform=eval_tf, preprocess=preprocess
+        )
+    else:
+        raise ValueError(eval_mode)
     print(f"DermNet test images: {len(test_ds)}")
 
     loader = DataLoader(
         test_ds,
-        batch_size=batch_size,
+        batch_size=batch_size if eval_mode == "full" else max(1, min(batch_size, 16)),
         shuffle=False,
         num_workers=2,
-        collate_fn=collate_with_paths,
+        collate_fn=collate_with_paths if eval_mode == "full" else collate_multicrop_with_paths,
     )
 
     model = load_classifier(weights, device=device)
-    probs, y, paths = predict(model, loader, device, tta=tta)
+    if eval_mode == "full":
+        probs, y, paths = predict(model, loader, device, tta=tta)
+    else:
+        probs, y, paths = predict_multicrop(
+            model, loader, device, tta=tta, agg=multicrop_agg
+        )
     preds = (probs >= 0.5).astype(int)
 
     metrics = {
@@ -150,6 +280,8 @@ def evaluate(
         "confusion_matrix": confusion_matrix(y, preds).tolist(),
         "da_method": da_method,
         "tta": tta,
+        "eval_mode": eval_mode,
+        "multicrop_agg": multicrop_agg if eval_mode == "multicrop" else None,
     }
     print(json.dumps(metrics, indent=2))
 
@@ -171,6 +303,8 @@ if __name__ == "__main__":
     p.add_argument("--dermnet-root", required=True)
     p.add_argument("--da-method", default="reinhard", choices=["none", "histogram", "reinhard"])
     p.add_argument("--no-tta", action="store_true")
+    p.add_argument("--eval-mode", default="full", choices=["full", "multicrop"])
+    p.add_argument("--multicrop-agg", default="top3_mean", choices=["max", "mean", "top3_mean"])
     p.add_argument("--out", default="outputs/dermnet_eval")
     args = p.parse_args()
     evaluate(
@@ -178,5 +312,7 @@ if __name__ == "__main__":
         dermnet_root=args.dermnet_root,
         da_method=args.da_method,
         tta=not args.no_tta,
+        eval_mode=args.eval_mode,
+        multicrop_agg=args.multicrop_agg,
         out_dir=args.out,
     )

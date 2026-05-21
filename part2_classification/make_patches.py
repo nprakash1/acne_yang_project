@@ -63,6 +63,39 @@ def _expand_box(box_xywh, scale, W, H):
     return [nx1, ny1, nx2, ny2]
 
 
+def _expand_box_with_min_side(box_xywh, scale, W, H, min_side: int | None = None):
+    """Expand bbox by scale, but optionally force an absolute crop side.
+
+    Relative scales alone are still too tight for tiny ACNE04 lesions: a
+    10-px lesion at 4x is only a 40-px crop before upsampling. `min_side`
+    forces wider context (e.g. 96/160/256 px) so positives look more like
+    DermNet wide clinical images where acne occupies a small part of frame.
+    """
+    x, y, w, h = box_xywh
+    cx, cy = x + w / 2, y + h / 2
+    side = max(w, h) * scale
+    if min_side is not None:
+        side = max(side, float(min_side))
+    side = min(side, float(W), float(H))
+    nx1 = max(0, int(round(cx - side / 2)))
+    ny1 = max(0, int(round(cy - side / 2)))
+    nx2 = min(W, int(round(cx + side / 2)))
+    ny2 = min(H, int(round(cy + side / 2)))
+    # If clipped at image boundary, shift the box back to preserve side where possible.
+    target = int(round(side))
+    if nx2 - nx1 < target:
+        if nx1 == 0:
+            nx2 = min(W, target)
+        elif nx2 == W:
+            nx1 = max(0, W - target)
+    if ny2 - ny1 < target:
+        if ny1 == 0:
+            ny2 = min(H, target)
+        elif ny2 == H:
+            ny1 = max(0, H - target)
+    return [nx1, ny1, nx2, ny2]
+
+
 # ---------------------------------------------------------------------------
 # negative samplers
 # ---------------------------------------------------------------------------
@@ -174,6 +207,7 @@ def make_patches(
     splits: dict[str, str] | None = None,
     expand: float | None = None,
     expand_scales: Iterable[float] = (1.5, 2.5, 4.0),
+    positive_min_sides: Iterable[int] | None = (64, 128, 256),
     target_size: int = 224,
     neg_per_pos: float = 1.0,
     neg_sampling: str = "texture",  # "texture" | "uniform"
@@ -192,6 +226,10 @@ def make_patches(
                      (1.5, 2.5, 4.0) emits one close-up, one medium, one wide
                      crop per GT box so the model sees acne at the same
                      "lesion area fraction" as DermNet at test time.
+    positive_min_sides: absolute minimum crop side(s), paired with
+                     expand_scales. This is the key wide-context fix: tiny
+                     lesions still produce 64/128/256 px context crops.
+                     Pass None or [] to disable and use relative scales only.
     target_size    : side length of saved patch (after resize)
     neg_per_pos    : how many negatives per positive PER SCALE
     neg_sampling   : "texture" -> Sobel-energy-weighted (diverse face parts),
@@ -200,6 +238,16 @@ def make_patches(
     if expand is not None:
         expand_scales = [float(expand)]
     expand_scales = list(expand_scales)
+    if positive_min_sides is not None:
+        positive_min_sides = list(positive_min_sides)
+        if len(positive_min_sides) == 0:
+            positive_min_sides = None
+        elif len(positive_min_sides) == 1 and len(expand_scales) > 1:
+            positive_min_sides = list(positive_min_sides) * len(expand_scales)
+        elif len(positive_min_sides) != len(expand_scales):
+            raise ValueError(
+                "positive_min_sides must be None, length 1, or same length as expand_scales"
+            )
     if neg_sampling not in ("texture", "uniform"):
         raise ValueError(f"neg_sampling must be 'texture' or 'uniform', got {neg_sampling}")
 
@@ -253,9 +301,10 @@ def make_patches(
             # ------------------- POSITIVES (multi-scale) -------------------
             saved_per_scale: dict[float, int] = {}
             scale_sides: dict[float, list[int]] = {}
-            for scale in expand_scales:
+            for si, scale in enumerate(expand_scales):
+                min_side = None if positive_min_sides is None else positive_min_sides[si]
                 for bi, box_xywh in enumerate(valid_boxes_xywh):
-                    ex = _expand_box(box_xywh, scale, W, H)
+                    ex = _expand_box_with_min_side(box_xywh, scale, W, H, min_side=min_side)
                     side_w = ex[2] - ex[0]
                     side_h = ex[3] - ex[1]
                     if side_w < 8 or side_h < 8:
@@ -264,7 +313,7 @@ def make_patches(
                         (target_size, target_size), Image.BILINEAR
                     )
                     crop.save(
-                        pos_dir / f"{stem}_p{bi}_s{scale:.1f}.jpg", quality=92
+                        pos_dir / f"{stem}_p{bi}_s{scale:.1f}_m{min_side or 0}.jpg", quality=92
                     )
                     n_pos += 1
                     saved_per_scale[scale] = saved_per_scale.get(scale, 0) + 1
@@ -340,6 +389,13 @@ if __name__ == "__main__":
         help="Context expansion factors for positives (multi-scale).",
     )
     p.add_argument(
+        "--positive-min-sides",
+        type=int,
+        nargs="+",
+        default=[64, 128, 256],
+        help="Absolute minimum crop side(s) for positives; pair with --expand-scales.",
+    )
+    p.add_argument(
         "--expand",
         type=float,
         default=None,
@@ -360,6 +416,7 @@ if __name__ == "__main__":
         out_root=args.out,
         expand=args.expand,
         expand_scales=args.expand_scales,
+        positive_min_sides=args.positive_min_sides,
         target_size=args.target_size,
         neg_per_pos=args.neg_per_pos,
         neg_sampling=args.neg_sampling,
